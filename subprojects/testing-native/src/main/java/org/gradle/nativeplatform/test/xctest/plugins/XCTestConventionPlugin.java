@@ -16,9 +16,12 @@
 
 package org.gradle.nativeplatform.test.xctest.plugins;
 
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import org.gradle.api.Action;
 import org.gradle.api.Incubating;
 import org.gradle.api.Plugin;
+import org.gradle.api.Project;
 import org.gradle.api.Task;
 import org.gradle.api.artifacts.ConfigurationContainer;
 import org.gradle.api.file.Directory;
@@ -28,6 +31,7 @@ import org.gradle.api.file.RegularFile;
 import org.gradle.api.internal.file.FileOperations;
 import org.gradle.api.internal.project.ProjectInternal;
 import org.gradle.api.provider.Provider;
+import org.gradle.api.provider.ProviderFactory;
 import org.gradle.api.specs.Spec;
 import org.gradle.api.tasks.TaskContainer;
 import org.gradle.api.tasks.util.PatternSet;
@@ -36,6 +40,8 @@ import org.gradle.language.cpp.plugins.CppBasePlugin;
 import org.gradle.language.swift.internal.DefaultSwiftComponent;
 import org.gradle.language.swift.model.SwiftComponent;
 import org.gradle.language.swift.plugins.SwiftBasePlugin;
+import org.gradle.language.swift.plugins.SwiftExecutablePlugin;
+import org.gradle.language.swift.plugins.SwiftLibraryPlugin;
 import org.gradle.language.swift.tasks.SwiftCompile;
 import org.gradle.nativeplatform.platform.internal.DefaultNativePlatform;
 import org.gradle.nativeplatform.tasks.LinkExecutable;
@@ -49,6 +55,7 @@ import org.gradle.nativeplatform.toolchain.internal.PlatformToolProvider;
 
 import javax.inject.Inject;
 import java.io.File;
+import java.util.Arrays;
 import java.util.Collections;
 
 /**
@@ -78,13 +85,14 @@ public class XCTestConventionPlugin implements Plugin<ProjectInternal> {
         // TODO - Add dependency on main component when Swift plugins are applied
 
         final DirectoryVar buildDirectory = project.getLayout().getBuildDirectory();
+        ProviderFactory providers = project.getProviders();
         Directory projectDirectory = project.getLayout().getProjectDirectory();
         ConfigurationContainer configurations = project.getConfigurations();
         TaskContainer tasks = project.getTasks();
 
         // TODO - Reuse logic from Swift*Plugin
         // Add the component extension
-        SwiftComponent component = project.getExtensions().create(SwiftComponent.class, "xctest", DefaultSwiftComponent.class, fileOperations);
+        SwiftComponent component = project.getExtensions().create(SwiftComponent.class, "xctest", DefaultSwiftComponent.class, fileOperations, providers);
         // TODO - should reuse convention from the component
         component.getSource().from(projectDirectory.dir("src/test/swift"));
 
@@ -101,7 +109,7 @@ public class XCTestConventionPlugin implements Plugin<ProjectInternal> {
 
         compile.setCompilerArgs(Lists.newArrayList("-g", "-F" + frameworkDir.getAbsolutePath()));
         compile.setMacros(Collections.<String, String>emptyMap());
-        compile.setModuleName(project.getName());
+        compile.setModuleName(project.getName() + "Test");
 
         compile.setObjectFileDir(buildDirectory.dir("test/objs"));
 
@@ -123,6 +131,8 @@ public class XCTestConventionPlugin implements Plugin<ProjectInternal> {
         link.setOutputFile(exeLocation);
         link.setTargetPlatform(currentPlatform);
         link.setToolChain(toolChain);
+
+        configureTestedComponent(project);
 
         // TODO - need to set basename from component
         Provider<Directory> testBundleDir = buildDirectory.dir("bundle/" + project.getName() + "Test.xctest");
@@ -160,5 +170,55 @@ public class XCTestConventionPlugin implements Plugin<ProjectInternal> {
         test.dependsOn(xcTest);
 
         // TODO - check should depend on test
+    }
+
+    private void configureTestedComponent(final Project project) {
+        project.getPlugins().withType(SwiftExecutablePlugin.class, new Action<SwiftExecutablePlugin>() {
+            @Override
+            public void execute(SwiftExecutablePlugin plugin) {
+                configureTestedSwiftComponent(project);
+            }
+        });
+
+        project.getPlugins().withType(SwiftLibraryPlugin.class, new Action<SwiftLibraryPlugin>() {
+            @Override
+            public void execute(SwiftLibraryPlugin plugin) {
+                configureTestedSwiftComponent(project);
+            }
+        });
+    }
+
+    private void configureTestedSwiftComponent(Project project) {
+        TaskContainer tasks = project.getTasks();
+        DirectoryVar buildDirectory = project.getLayout().getBuildDirectory();
+
+        SwiftCompile compile = tasks.create("compileMainSwiftWithTestingEnabled", SwiftCompile.class, configureCompileTestedComponentTask(tasks.withType(SwiftCompile.class).getByName("compileSwift")));
+        compile.setObjectFileDir(buildDirectory.dir("test/objs"));
+        compile.setCompilerArgs(Lists.newArrayList(Iterables.concat(compile.getCompilerArgs(), Arrays.asList("-enable-testing"))));
+
+        SwiftCompile compileTest = tasks.withType(SwiftCompile.class).getByName("compileTestSwift");
+        compileTest.dependsOn(compile);
+        compileTest.includes(buildDirectory.dir("test/objs"));
+    }
+
+    private static Action<SwiftCompile> configureCompileTestedComponentTask(final SwiftCompile sourceTask) {
+        return new Action<SwiftCompile>() {
+            @Override
+            public void execute(SwiftCompile destinationTask) {
+                destinationTask.source(sourceTask.getSource().filter(new Spec<File>() {
+                    @Override
+                    public boolean isSatisfiedBy(File element) {
+                        return !element.getName().equals("main.swift");
+                    }
+                }));
+                destinationTask.setModuleName(sourceTask.getModuleName());
+                destinationTask.setTargetPlatform(sourceTask.getTargetPlatform());
+                destinationTask.setToolChain(sourceTask.getToolChain());
+                destinationTask.setMacros(sourceTask.getMacros());
+                destinationTask.includes(sourceTask.getIncludes());
+                destinationTask.setObjectFileDir(sourceTask.getObjectFileDir());
+                destinationTask.setCompilerArgs(sourceTask.getCompilerArgs());
+            }
+        };
     }
 }
